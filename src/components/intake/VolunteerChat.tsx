@@ -22,6 +22,7 @@ export default function VolunteerChat() {
   ]);
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
+  const [isRegistered, setIsRegistered] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Initialize our real-time Firebase hook
@@ -34,7 +35,7 @@ export default function VolunteerChat() {
 
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!input.trim()) return;
+    if (!input.trim() || isRegistered) return;
 
     const userText = input.trim();
     
@@ -43,37 +44,66 @@ export default function VolunteerChat() {
       role: 'user',
       content: userText,
     };
-
-    setMessages((prev) => [...prev, newUserMsg]);
+    
+    const newHistory = [...messages, newUserMsg];
+    setMessages(newHistory);
     setInput('');
     setIsTyping(true);
 
     try {
-      // 1. Send the user's natural language to Gemini to extract structured JSON
-      const extractedData = await parseVolunteerMessage(userText);
+      // 1. Send the conversation history to Gemini to extract structured JSON
+      const extractedData = await parseVolunteerMessage(newHistory);
 
       if (extractedData) {
-        // 2. Save the extracted JSON directly to Firestore
-        await addVolunteer(extractedData);
+        // Only finalize and save if we have the critical fields (name and contact)
+        const isDataSufficient = !!(extractedData.name && extractedData.contact);
 
-        // 3. Generate a dynamic conversational response based on what Gemini found
-        const name = extractedData.name || 'friend';
-        const skillsCount = extractedData.skills.length + extractedData.equipment.length;
-        
-        let aiResponseText = `Thank you, ${name}! I've successfully added you to our active dispatch queue. `;
-        if (skillsCount > 0) {
-          aiResponseText += `Our coordinators have noted your capabilities (${[...extractedData.skills, ...extractedData.equipment].join(', ')}). `;
+        if (isDataSufficient) {
+          // 2. Save the extracted JSON directly to Firestore
+          await addVolunteer(extractedData);
+
+          // 3. Generate a dynamic conversational response based on what Gemini found
+          const name = extractedData.name || 'friend';
+          const skillsCount = extractedData.skills.length + extractedData.equipment.length;
+
+          // Simple logic to "assign" a role based on skills
+          let assignedRole = "General Support";
+          const allCapabilities = [...extractedData.skills, ...extractedData.equipment].map(s => s.toLowerCase());
+          
+          if (allCapabilities.some(c => c.includes('medic') || c.includes('nurse') || c.includes('first aid'))) {
+            assignedRole = "Medical Response Team";
+          } else if (allCapabilities.some(c => c.includes('truck') || c.includes('van') || c.includes('transport'))) {
+            assignedRole = "Logistics & Supply Chain";
+          } else if (allCapabilities.some(c => c.includes('chainsaw') || c.includes('tools') || c.includes('shovels'))) {
+            assignedRole = "Debris Clearance & Infrastructure";
+          } else if (allCapabilities.some(c => c.includes('cook') || c.includes('food') || c.includes('water'))) {
+            assignedRole = "Mass Care & Nutrition";
+          }
+
+          setIsRegistered(true);
+          
+          let aiResponseText = `Thank you, ${name}! I've officially assigned you to our **${assignedRole}** unit. `;
+          
+          if (skillsCount > 0) {
+            aiResponseText += `I've noted your specific capabilities: ${[...extractedData.skills, ...extractedData.equipment].join(', ')}. `;
+          }
+          aiResponseText += "We will reach out the moment a task matches your profile.";
+
+          setMessages((prev) => [...prev, {
+            id: (Date.now() + 1).toString(),
+            role: 'system',
+            content: aiResponseText
+          }]);
+        } else {
+        // The AI successfully parsed the message but didn't find enough info yet
+          setMessages((prev) => [...prev, {
+            id: (Date.now() + 1).toString(),
+            role: 'system',
+          content: "I'm starting to build your profile, but I still need your name and a way to contact you (email or phone) to finish the registration. Could you provide those?"
+          }]);
         }
-        aiResponseText += "We will reach out the moment a task matches your profile.";
-
-        setMessages((prev) => [...prev, {
-          id: (Date.now() + 1).toString(),
-          role: 'system',
-          content: aiResponseText
-        }]);
-
       } else {
-        // Fallback if the AI fails to parse the message
+        // Fallback if the AI fails to parse the message entirely
         setMessages((prev) => [...prev, {
           id: (Date.now() + 1).toString(),
           role: 'system',
@@ -178,11 +208,11 @@ export default function VolunteerChat() {
             onChange={(e) => setInput(e.target.value)}
             placeholder="Type your message here..."
             className="flex-1 bg-white/80 text-slate-800 placeholder:text-slate-400 px-6 py-4 rounded-full border border-white/60 focus:outline-none focus:ring-4 focus:ring-violet-200/50 shadow-inner transition-all"
-            disabled={isTyping}
+            disabled={isTyping || isRegistered}
           />
           <motion.button
             type="submit"
-            disabled={!input.trim() || isTyping}
+            disabled={!input.trim() || isTyping || isRegistered}
             whileHover={{ scale: 1.05 }}
             whileTap={{ scale: 0.95 }}
             className="absolute right-2 flex items-center justify-center p-3 rounded-full bg-gradient-to-r from-violet-500 to-fuchsia-500 text-white shadow-lg disabled:opacity-50 disabled:cursor-not-allowed border border-white/20"

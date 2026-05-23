@@ -9,7 +9,7 @@ const genAI = new GoogleGenerativeAI(apiKey);
 // SCHEMAS
 // ============================================================================
 
-const volunteerSchema = {
+const volunteerSchema: any = {
   type: SchemaType.OBJECT,
   properties: {
     name: { type: SchemaType.STRING, description: "The volunteer's name. Use an empty string if not provided." },
@@ -37,7 +37,7 @@ const volunteerSchema = {
   required: ["name", "contact", "skills", "equipment", "availability", "status"]
 };
 
-const publicSiteSchema = {
+const publicSiteSchema: any = {
   type: SchemaType.OBJECT,
   properties: {
     title: { 
@@ -84,10 +84,10 @@ export interface PublicSiteData {
 // ============================================================================
 
 /**
- * Sends a natural language message to Gemini 2.5 Flash and extracts
+ * Sends a natural language message to Gemini 1.5 Flash and extracts
  * structured JSON data matching the Volunteer interface.
  */
-export async function parseVolunteerMessage(message: string): Promise<Omit<Volunteer, 'id'> | null> {
+export async function parseVolunteerMessage(history: { role: string; content: string }[]): Promise<Omit<Volunteer, 'id'> | null> {
   if (!apiKey) {
     console.error("Missing VITE_GEMINI_API_KEY in environment variables.");
     return null;
@@ -95,29 +95,43 @@ export async function parseVolunteerMessage(message: string): Promise<Omit<Volun
 
   try {
     const model = genAI.getGenerativeModel({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-1.5-flash',
+      systemInstruction: `You are a specialized data extraction bot. Analyze conversation history and extract volunteer details into the provided JSON schema. 
+      IMPORTANT: If a field is missing, use an empty string or empty array. If the user is just saying hello or off-topic, still return the JSON object with empty fields and 'status' as 'pending'. 
+      Never return plain text; always return valid JSON.`,
       generationConfig: {
         responseMimeType: 'application/json',
         responseSchema: volunteerSchema,
-        temperature: 0.1, 
+        temperature: 0.1,
       }
     });
 
-    const prompt = `
-      You are an expert data extraction assistant for a community emergency response platform.
-      Analyze the following message from a potential volunteer and extract their details into the required JSON format.
-      If a specific piece of information is missing from the message, leave the string empty or the array empty.
-      
-      Message to parse: "${message}"
-    `;
+    const conversation = history
+      .map((m) => `${m.role === 'system' ? 'Assistant' : 'User'}: ${m.content}`)
+      .join('\n');
+
+    const prompt = `Analyze this conversation and extract the volunteer's information:\n\n${conversation}`;
 
     const result = await model.generateContent(prompt);
-    const responseText = result.response.text();
-    
-    return JSON.parse(responseText) as Omit<Volunteer, 'id'>;
 
+    // Check if the response was blocked or empty
+    const response = result.response;
+    if (!response || !response.candidates?.[0]) {
+      console.warn("Gemini: No response candidates returned. This might be due to safety filters.");
+      return null;
+    }
+
+    const responseText = result.response.text();
+    if (!responseText) return null;
+
+    // Robust JSON extraction: look for the first '{' and last '}'
+    const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+    const cleanJson = jsonMatch ? jsonMatch[0] : responseText.trim();
+    if (!cleanJson) return null;
+
+    return JSON.parse(cleanJson) as Omit<Volunteer, 'id'>;
   } catch (error) {
-    console.error("Failed to parse volunteer message with Gemini:", error);
+    console.error("Gemini API Error:", error);
     return null;
   }
 }
@@ -134,7 +148,7 @@ export async function generatePublicSite(incidentDescription: string): Promise<P
 
   try {
     const model = genAI.getGenerativeModel({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-1.5-flash',
       generationConfig: {
         responseMimeType: 'application/json',
         responseSchema: publicSiteSchema,
@@ -159,8 +173,12 @@ export async function generatePublicSite(incidentDescription: string): Promise<P
 
     const result = await model.generateContent(prompt);
     const responseText = result.response.text();
-    
-    return JSON.parse(responseText) as PublicSiteData;
+
+    // Sanitize response: Remove potential markdown code blocks and whitespace
+    const cleanJson = responseText.replace(/```json\n?|\n?```/g, '').trim();
+    if (!cleanJson) return null;
+
+    return JSON.parse(cleanJson) as PublicSiteData;
 
   } catch (error) {
     console.error("Failed to generate public site with Gemini:", error);
@@ -181,7 +199,7 @@ export async function askAssistant(prompt: string, incidentsJson: string): Promi
 
   try {
     const model = genAI.getGenerativeModel({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-1.5-flash',
       generationConfig: {
         temperature: 0.2, // Low temperature for factual, operational responses
       }
